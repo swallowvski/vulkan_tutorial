@@ -32,7 +32,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new();
     let window = WindowBuilder::new()
         .with_title("Vulkan Tutorial (Rust)")
-        .with_inner_size(LogicalSize::new(1024.0, 768.0))
+        .with_inner_size(LogicalSize::new(1024, 768))
         .build(&event_loop)?;
 
     let mut app = unsafe { App::create(&window)? };
@@ -62,6 +62,7 @@ struct App {
     entry: Entry,
     instance: Instance,
     data: AppData,
+    device: Device,
 }
 
 impl App {
@@ -71,10 +72,12 @@ impl App {
         let mut data = AppData::default();
         let instance = create_instance(window, &entry, &mut data)?;
         pick_physical_device(&instance, &mut data)?;
+        let device = create_logical_device(&instance, &mut data)?;
         Ok(Self {
             entry,
             instance,
             data,
+            device,
         })
     }
 
@@ -83,6 +86,7 @@ impl App {
     }
 
     unsafe fn destroy(&mut self) {
+        self.device.destroy_device(None);
         if VALIDATION_ENABLED {
             self.instance
                 .destroy_debug_utils_messenger_ext(self.data.messenger, None);
@@ -95,6 +99,7 @@ impl App {
 struct AppData {
     messenger: vk::DebugUtilsMessengerEXT,
     physical_device: vk::PhysicalDevice,
+    graphics_queue: vk::Queue,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -203,16 +208,45 @@ unsafe fn check_physical_device(
     data: &AppData,
     physical_device: vk::PhysicalDevice,
 ) -> Result<()> {
-    QueueFamilyIndeices::get(instance, data, physical_device)?;
+    QueueFamilyIndices::get(instance, data, physical_device)?;
     Ok(())
 }
 
+unsafe fn create_logical_device(instance: &Instance, data: &mut AppData) -> Result<Device> {
+    let indices = QueueFamilyIndices::get(instance, data, data.physical_device)?;
+
+    let queue_priorities = &[1.0];
+    let queue_info = vk::DeviceQueueCreateInfo::builder()
+        .queue_family_index(indices.graphics)
+        .queue_priorities(queue_priorities);
+
+    let layers = if VALIDATION_ENABLED {
+        vec![VALIDATION_LAYER.as_ptr()]
+    } else {
+        vec![]
+    };
+
+    let features = vk::PhysicalDeviceFeatures::builder();
+
+    let queue_infos = &[queue_info];
+    let info = vk::DeviceCreateInfo::builder()
+        .queue_create_infos(queue_infos)
+        .enabled_layer_names(&layers)
+        .enabled_features(&features);
+
+    let device = instance.create_device(data.physical_device, &info, None)?;
+
+    data.graphics_queue = device.get_device_queue(indices.graphics, 0);
+
+    Ok(device)
+}
+
 #[derive(Clone, Copy, Debug)]
-struct QueueFamilyIndeices {
+struct QueueFamilyIndices {
     graphics: u32,
 }
 
-impl QueueFamilyIndeices {
+impl QueueFamilyIndices {
     unsafe fn get(
         instance: &Instance,
         data: &AppData,
