@@ -70,6 +70,7 @@ impl App {
         let entry = Entry::new(loader).map_err(|b| anyhow!("{b}"))?;
         let mut data = AppData::default();
         let instance = create_instance(window, &entry, &mut data)?;
+        pick_physical_device(&instance, &mut data)?;
         Ok(Self {
             entry,
             instance,
@@ -199,9 +200,10 @@ unsafe fn pick_physical_device(instance: &Instance, data: &mut AppData) -> Resul
 
 unsafe fn check_physical_device(
     instance: &Instance,
-    data: &mut AppData,
+    data: &AppData,
     physical_device: vk::PhysicalDevice,
 ) -> Result<()> {
+    QueueFamilyIndeices::get(instance, data, physical_device)?;
     Ok(())
 }
 
