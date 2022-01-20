@@ -14,6 +14,7 @@ use log::*;
 use thiserror::Error;
 use vulkanalia::loader::{LibloadingLoader, LIBRARY};
 use vulkanalia::prelude::v1_0::*;
+use vulkanalia::vk::KhrSurfaceExtension;
 use vulkanalia::window as vk_window;
 use winit::dpi::LogicalSize;
 use winit::event::{Event, WindowEvent};
@@ -71,6 +72,7 @@ impl App {
         let entry = Entry::new(loader).map_err(|b| anyhow!("{b}"))?;
         let mut data = AppData::default();
         let instance = create_instance(window, &entry, &mut data)?;
+        data.surface = vk_window::create_surface(&instance, window)?;
         pick_physical_device(&instance, &mut data)?;
         let device = create_logical_device(&instance, &mut data)?;
         Ok(Self {
@@ -91,6 +93,7 @@ impl App {
             self.instance
                 .destroy_debug_utils_messenger_ext(self.data.messenger, None);
         }
+        self.instance.destroy_surface_khr(self.data.surface, None);
         self.instance.destroy_instance(None);
     }
 }
@@ -100,6 +103,7 @@ struct AppData {
     messenger: vk::DebugUtilsMessengerEXT,
     physical_device: vk::PhysicalDevice,
     graphics_queue: vk::Queue,
+    surface: vk::SurfaceKHR,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -244,6 +248,7 @@ unsafe fn create_logical_device(instance: &Instance, data: &mut AppData) -> Resu
 #[derive(Clone, Copy, Debug)]
 struct QueueFamilyIndices {
     graphics: u32,
+    present: u32,
 }
 
 impl QueueFamilyIndices {
@@ -259,8 +264,22 @@ impl QueueFamilyIndices {
             .position(|p| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
             .map(|i| i as u32);
 
-        if let Some(graphics) = graphics {
-            Ok(Self { graphics })
+        let mut present = None;
+        for (index, p) in properties.iter().enumerate() {
+            if instance.get_physical_device_surface_support_khr(
+                physical_device,
+                index as u32,
+                data.surface,
+            )? {
+                present = Some(index as u32);
+                break;
+            }
+        }
+
+        dbg!(graphics, present);
+
+        if let (Some(graphics), Some(present)) = (graphics, present) {
+            Ok(Self { graphics, present })
         } else {
             Err(anyhow!(SuitabilityError(
                 "Missing required queue families."
