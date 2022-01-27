@@ -79,6 +79,8 @@ impl App {
         pick_physical_device(&instance, &mut data)?;
         let device = create_logical_device(&instance, &mut data)?;
         create_swapchain(window, &instance, &device, &mut data)?;
+        create_swapchain_image_views(&device, &mut data)?;
+        create_pipline(&device, &mut data)?;
         Ok(Self {
             entry,
             instance,
@@ -92,6 +94,10 @@ impl App {
     }
 
     unsafe fn destroy(&mut self) {
+        self.data
+            .swapchain_image_views
+            .iter()
+            .for_each(|v| self.device.destroy_image_view(*v, None));
         self.device.destroy_swapchain_khr(self.data.swapchain, None);
         self.device.destroy_device(None);
         self.instance.destroy_surface_khr(self.data.surface, None);
@@ -115,6 +121,7 @@ struct AppData {
     swapchain_extent: vk::Extent2D,
     swapchain: vk::SwapchainKHR,
     swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -389,6 +396,73 @@ pub fn get_swapchain_extent(
             ))
             .build()
     }
+}
+
+unsafe fn create_swapchain_image_views(device: &Device, data: &mut AppData) -> Result<()> {
+    data.swapchain_image_views = data
+        .swapchain_images
+        .iter()
+        .map(|i| {
+            let components = vk::ComponentMapping::builder()
+                .r(vk::ComponentSwizzle::IDENTITY)
+                .g(vk::ComponentSwizzle::IDENTITY)
+                .b(vk::ComponentSwizzle::IDENTITY)
+                .a(vk::ComponentSwizzle::IDENTITY);
+
+            let subresouce_range = vk::ImageSubresourceRange::builder()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1);
+
+            let info = vk::ImageViewCreateInfo::builder()
+                .image(*i)
+                .view_type(vk::ImageViewType::_2D)
+                .format(data.swapchain_format)
+                .subresource_range(subresouce_range);
+
+            device.create_image_view(&info, None)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(())
+}
+
+unsafe fn create_pipline(device: &Device, data: &mut AppData) -> Result<()> {
+    let vert = include_bytes!("../shaders/vert.spv");
+    let frag = include_bytes!("../shaders/frag.spv");
+
+    let vert_shader_module = create_shader_module(device, &vert[..])?;
+    let frag_shader_module = create_shader_module(device, &frag[..])?;
+
+    let vert_stage = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vert_shader_module)
+        .name(b"main\0");
+
+    let frag_stage = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(frag_shader_module)
+        .name(b"main\0");
+
+    device.destroy_shader_module(vert_shader_module, None);
+    device.destroy_shader_module(frag_shader_module, None);
+
+    Ok(())
+}
+
+unsafe fn create_shader_module(device: &Device, bytecode: &[u8]) -> Result<vk::ShaderModule> {
+    let bytecode = Vec::<u8>::from(bytecode);
+    let (prefix, code, shuffix) = bytecode.align_to::<u32>();
+    if !prefix.is_empty() || !shuffix.is_empty() {
+        return Err(anyhow!("Shader bytecode is not properly aligned."));
+    }
+
+    let info = vk::ShaderModuleCreateInfo::builder()
+        .code_size(bytecode.len())
+        .code(code);
+
+    Ok(device.create_shader_module(&info, None)?)
 }
 
 #[derive(Clone, Copy, Debug)]
