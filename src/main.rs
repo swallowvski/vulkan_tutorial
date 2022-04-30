@@ -10,6 +10,7 @@ use std::{ffi::CStr, os::raw::c_void};
 use log::*;
 
 use anyhow::{anyhow, Result};
+use thiserror::Error;
 use vulkanalia::{
     loader::{LibloadingLoader, LIBRARY},
     prelude::v1_0::*,
@@ -71,6 +72,8 @@ impl App {
         let entry = Entry::new(loader).map_err(|b| anyhow!("{}", b))?;
         let mut data = AppData::default();
         let instance = create_instance(window, &entry, &mut data)?;
+        pick_physical_device(&instance, &mut data)?;
+
         Ok(Self {
             entry,
             instance,
@@ -92,6 +95,7 @@ impl App {
 #[derive(Clone, Debug, Default)]
 struct AppData {
     messenger: vk::DebugUtilsMessengerEXT,
+    physical_device: vk::PhysicalDevice,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -106,12 +110,7 @@ unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) ->
         .iter()
         .map(|e| e.as_ptr())
         .collect::<Vec<_>>();
-
-    dbg!(&extensions);
-
     extensions.push(vk::EXT_DEBUG_UTILS_EXTENSION.name.as_ptr());
-
-    dbg!(&extensions);
 
     let layers = vec![VALIDATION_LAYER.as_ptr()];
 
@@ -160,4 +159,77 @@ extern "system" fn debug_callback(
     }
 
     vk::FALSE
+}
+
+#[derive(Debug, Error)]
+#[error("Missing {0}.")]
+struct SuitabilityErrror(pub &'static str);
+
+unsafe fn pick_physical_device(instance: &Instance, data: &mut AppData) -> Result<()> {
+    for physical_device in instance.enumerate_physical_devices()? {
+        let properties = instance.get_physical_device_properties(physical_device);
+
+        if let Err(error) = check_physical_device(instance, data, physical_device) {
+            warn!(
+                "Skipping physical device (`{}`): {}",
+                properties.device_name, error
+            );
+        } else {
+            info!("Selected physical device (`{}`).", properties.device_name);
+            data.physical_device = physical_device;
+            return Ok(());
+        }
+    }
+    Ok(())
+}
+
+unsafe fn check_physical_device(
+    instance: &Instance,
+    data: &mut AppData,
+    physical_device: vk::PhysicalDevice,
+) -> Result<()> {
+    let properties = instance.get_physical_device_properties(physical_device);
+    if properties.device_type != vk::PhysicalDeviceType::DISCRETE_GPU {
+        return Err(anyhow!(SuitabilityErrror(
+            "Only discrete GPUs are supported."
+        )));
+    }
+
+    let features = instance.get_physical_device_features(physical_device);
+    if features.geometry_shader != vk::TRUE {
+        return Err(anyhow!(SuitabilityErrror(
+            "Missing geometry shader supported."
+        )));
+    }
+
+    QueueFamilyIndices::get(instance, data, physical_device)?;
+    Ok(())
+}
+
+#[derive(Copy, Clone, Debug)]
+struct QueueFamilyIndices {
+    graphics: u32,
+}
+
+impl QueueFamilyIndices {
+    unsafe fn get(
+        instance: &Instance,
+        data: &mut AppData,
+        physical_device: vk::PhysicalDevice,
+    ) -> Result<Self> {
+        let properties = instance.get_physical_device_queue_family_properties(physical_device);
+
+        let graphics_option = properties
+            .iter()
+            .position(|p| p.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .map(|i| i as u32);
+
+        if let Some(graphics) = graphics_option {
+            Ok(Self { graphics })
+        } else {
+            Err(anyhow!(SuitabilityErrror(
+                "Missing required queue families"
+            )))
+        }
+    }
 }
