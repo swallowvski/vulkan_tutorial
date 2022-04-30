@@ -1094,9 +1094,9 @@ dependencies = [
 
 [[package]]
 name = "vulkanalia"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "061b614afdfe3241763afe576b5baf3eb49bd8350d20137d3f11e6629ec51fdd"
+checksum = "74c917070549dd011ca7e0d93025f8e945b78f120583edef8c460c78399e1b8e"
 dependencies = [
  "cocoa",
  "libloading",
@@ -1108,9 +1108,9 @@ dependencies = [
 
 [[package]]
 name = "vulkanalia-sys"
-version = "0.12.0"
+version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f14e24fde83920e89f943236e6155304a2b7b2a32a1d79830bebf1f614d5d9cc"
+checksum = "37ad617f77bb369f6ad6df75d07a2bd6075119bf641055c2542e3eb357683d75"
 dependencies = [
  "bitflags",
 ]
