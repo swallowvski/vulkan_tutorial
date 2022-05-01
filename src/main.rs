@@ -14,17 +14,13 @@ use thiserror::Error;
 use vulkanalia::{
     loader::{LibloadingLoader, LIBRARY},
     prelude::v1_0::*,
-    vk::{
-        ExtDebugUtilsExtension, KhrSurfaceExtension, KhrSwapchainExtension,
-        KhrWin32SurfaceExtension, SwapchainCounterCreateInfoEXT,
-    },
+    vk::{ExtDebugUtilsExtension, KhrSurfaceExtension, KhrSwapchainExtension},
     window as vk_window,
 };
 use winit::{
     dpi::LogicalSize,
     event::{Event, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
-    platform::windows::WindowExtWindows,
     window::{Window, WindowBuilder},
 };
 
@@ -83,6 +79,7 @@ impl App {
         pick_physical_device(&instance, &mut data)?;
         let device = create_logical_device(&instance, &mut data)?;
         create_swapchain(window, &instance, &device, &mut data)?;
+        create_swapchain_image_veiws(&device, &mut data)?;
 
         Ok(Self {
             entry,
@@ -97,6 +94,10 @@ impl App {
     }
 
     unsafe fn destroy(&mut self) {
+        self.data
+            .swapchain_image_views
+            .iter()
+            .for_each(|v| self.device.destroy_image_view(*v, None));
         self.device.destroy_swapchain_khr(self.data.swapchain, None);
         self.device.destroy_device(None);
         self.instance
@@ -116,7 +117,8 @@ struct AppData {
     swapchain_format: vk::Format,
     swapchain_extent: vk::Extent2D,
     swapchain: vk::SwapchainKHR,
-    swapchain_image: Vec<vk::Image>,
+    swapchain_images: Vec<vk::Image>,
+    swapchain_image_views: Vec<vk::ImageView>,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -342,7 +344,7 @@ unsafe fn create_swapchain(
         .old_swapchain(vk::SwapchainKHR::null());
 
     data.swapchain = device.create_swapchain_khr(&info, None)?;
-    data.swapchain_image = device.get_swapchain_images_khr(data.swapchain)?;
+    data.swapchain_images = device.get_swapchain_images_khr(data.swapchain)?;
 
     Ok(())
 }
@@ -388,6 +390,37 @@ fn get_swapchain_extension(
             ))
             .build()
     }
+}
+
+unsafe fn create_swapchain_image_veiws(device: &Device, data: &mut AppData) -> Result<()> {
+    data.swapchain_image_views = data
+        .swapchain_images
+        .iter()
+        .map(|i| {
+            let components = vk::ComponentMapping::builder()
+                .r(vk::ComponentSwizzle::IDENTITY)
+                .g(vk::ComponentSwizzle::IDENTITY)
+                .b(vk::ComponentSwizzle::IDENTITY)
+                .a(vk::ComponentSwizzle::IDENTITY);
+
+            let subresource_range = vk::ImageSubresourceRange::builder()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .base_mip_level(0)
+                .level_count(1)
+                .base_array_layer(0)
+                .layer_count(1);
+
+            let info = vk::ImageViewCreateInfo::builder()
+                .image(*i)
+                .view_type(vk::ImageViewType::_2D)
+                .format(data.swapchain_format)
+                .components(components)
+                .subresource_range(subresource_range);
+
+            device.create_image_view(&info, None)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(())
 }
 
 #[derive(Copy, Clone, Debug)]
