@@ -5,11 +5,13 @@
     clippy::unnecessary_wraps
 )]
 
-use std::{collections::HashSet, ffi::CStr, fmt::Debug, os::raw::c_void};
+use std::{collections::HashSet, ffi::CStr, fmt::Debug, mem::size_of, os::raw::c_void};
 
 use log::*;
 
 use anyhow::{anyhow, Result};
+use lazy_static::lazy_static;
+use nalgebra_glm as glm;
 use thiserror::Error;
 use vulkanalia::{
     loader::{LibloadingLoader, LIBRARY},
@@ -23,6 +25,14 @@ use winit::{
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
+
+lazy_static! {
+    static ref VERTICES: Vec<Vertex> = vec![
+        Vertex::new(glm::vec2(0., -0.5), glm::vec3(1., 0., 0.)),
+        Vertex::new(glm::vec2(0.5, 0.5), glm::vec3(0., 1., 0.)),
+        Vertex::new(glm::vec2(-0.5, 0.5), glm::vec3(0., 0., 1.)),
+    ];
+}
 
 const VALIDATION_ENABLED: bool = cfg!(debug_assertions);
 
@@ -634,7 +644,11 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         .module(frag_shader_module)
         .name(b"main\0");
 
-    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder();
+    let binding_descriptions = &[Vertex::binding_description()];
+    let attribute_descriptions = Vertex::attribute_descriptions();
+    let vertex_input_state = vk::PipelineVertexInputStateCreateInfo::builder()
+        .vertex_binding_descriptions(binding_descriptions)
+        .vertex_attribute_descriptions(&attribute_descriptions);
 
     let input_assembly_state = vk::PipelineInputAssemblyStateCreateInfo::builder()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST)
@@ -898,5 +912,44 @@ impl SwapchainSupport {
             present_modes: instance
                 .get_physical_device_surface_present_modes_khr(physical_device, data.surface)?,
         })
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct Vertex {
+    pos: glm::Vec2,
+    color: glm::Vec3,
+}
+
+impl Vertex {
+    fn new(pos: glm::Vec2, color: glm::Vec3) -> Self {
+        Self { pos, color }
+    }
+
+    fn binding_description() -> vk::VertexInputBindingDescription {
+        vk::VertexInputBindingDescription::builder()
+            .binding(0)
+            .stride(size_of::<Vertex>() as u32)
+            .input_rate(vk::VertexInputRate::VERTEX)
+            .build()
+    }
+
+    fn attribute_descriptions() -> [vk::VertexInputAttributeDescription; 2] {
+        let pos = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(0)
+            .format(vk::Format::R32G32_SFLOAT)
+            .offset(0)
+            .build();
+
+        let color = vk::VertexInputAttributeDescription::builder()
+            .binding(0)
+            .location(1)
+            .format(vk::Format::R32G32B32_SFLOAT)
+            .offset(size_of::<glm::Vec2>() as u32)
+            .build();
+
+        [pos, color]
     }
 }
