@@ -5,7 +5,10 @@
     clippy::unnecessary_wraps
 )]
 
-use std::{collections::HashSet, ffi::CStr, fmt::Debug, mem::size_of, os::raw::c_void};
+use std::{
+    collections::HashSet, ffi::CStr, fmt::Debug, mem::size_of, os::raw::c_void,
+    ptr::copy_nonoverlapping as memcpy,
+};
 
 use log::*;
 
@@ -28,7 +31,7 @@ use winit::{
 
 lazy_static! {
     static ref VERTICES: Vec<Vertex> = vec![
-        Vertex::new(glm::vec2(0., -0.5), glm::vec3(1., 0., 0.)),
+        Vertex::new(glm::vec2(0., -0.5), glm::vec3(1., 1., 1.)),
         Vertex::new(glm::vec2(0.5, 0.5), glm::vec3(0., 1., 0.)),
         Vertex::new(glm::vec2(-0.5, 0.5), glm::vec3(0., 0., 1.)),
     ];
@@ -113,6 +116,7 @@ impl App {
         create_pipeline(&device, &mut data)?;
         create_framebuffer(&device, &mut data)?;
         create_command_pool(&instance, &device, &mut data)?;
+        create_vertex_buffer(&instance, &device, &mut data)?;
         create_command_buffers(&device, &mut data)?;
         create_sync_objects(&device, &mut data)?;
 
@@ -216,6 +220,9 @@ impl App {
     unsafe fn destroy(&mut self) {
         self.device.device_wait_idle().unwrap();
         self.destroy_swapchain();
+        self.device.destroy_buffer(self.data.vertex_buffer, None);
+        self.device
+            .free_memory(self.data.vertex_buffer_memory, None);
         self.data
             .in_flight_fences
             .iter()
@@ -278,6 +285,8 @@ struct AppData {
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     images_in_flight: Vec<vk::Fence>,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -780,6 +789,43 @@ unsafe fn create_command_pool(
     Ok(())
 }
 
+unsafe fn create_vertex_buffer(
+    instance: &Instance,
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let buffer_info = vk::BufferCreateInfo::builder()
+        .size((size_of::<Vertex>() * VERTICES.len()) as u64)
+        .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    data.vertex_buffer = device.create_buffer(&buffer_info, None)?;
+
+    let requirements = device.get_buffer_memory_requirements(data.vertex_buffer);
+
+    let memory_info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(requirements.size)
+        .memory_type_index(get_memory_type_index(
+            instance,
+            data,
+            vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
+            requirements,
+        )?);
+
+    data.vertex_buffer_memory = device.allocate_memory(&memory_info, None)?;
+    device.bind_buffer_memory(data.vertex_buffer, data.vertex_buffer_memory, 0)?;
+    let memory = device.map_memory(
+        data.vertex_buffer_memory,
+        0,
+        buffer_info.size,
+        vk::MemoryMapFlags::empty(),
+    )?;
+    memcpy(VERTICES.as_ptr(), memory.cast(), VERTICES.len());
+    device.unmap_memory(data.vertex_buffer_memory);
+
+    Ok(())
+}
+
 unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<()> {
     let allocate_info = vk::CommandBufferAllocateInfo::builder()
         .command_pool(data.command_pool)
@@ -821,6 +867,7 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
             vk::PipelineBindPoint::GRAPHICS,
             data.pipeline,
         );
+        device.cmd_bind_vertex_buffers(*command_buffer, 0, &[data.vertex_buffer], &[0]);
         device.cmd_draw(*command_buffer, 3, 1, 0, 0);
 
         device.cmd_end_render_pass(*command_buffer);
@@ -952,4 +999,20 @@ impl Vertex {
 
         [pos, color]
     }
+}
+
+unsafe fn get_memory_type_index(
+    instance: &Instance,
+    data: &mut AppData,
+    properties: vk::MemoryPropertyFlags,
+    requirements: vk::MemoryRequirements,
+) -> Result<u32> {
+    let memory = instance.get_physical_device_memory_properties(data.physical_device);
+    (0..memory.memory_type_count)
+        .find(|i| {
+            let suitable = (requirements.memory_type_bits & (1 << i)) != 0;
+            let memory_type = memory.memory_types[*i as usize];
+            suitable && memory_type.property_flags.contains(properties)
+        })
+        .ok_or_else(|| anyhow!("Failed to find suitable memory type."))
 }
