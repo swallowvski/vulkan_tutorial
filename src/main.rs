@@ -31,7 +31,7 @@ use winit::{
 
 lazy_static! {
     static ref VERTICES: Vec<Vertex> = vec![
-        Vertex::new(glm::vec2(0.5, -0.5), glm::vec3(1., 0., 0.)),
+        Vertex::new(glm::vec2(-0.5, -0.5), glm::vec3(1., 0., 0.)),
         Vertex::new(glm::vec2(0.5, -0.5), glm::vec3(0., 1., 0.)),
         Vertex::new(glm::vec2(0.5, 0.5), glm::vec3(0., 0., 1.)),
         Vertex::new(glm::vec2(-0.5, 0.5), glm::vec3(1., 1., 1.)),
@@ -114,10 +114,10 @@ impl App {
         pick_physical_device(&instance, &mut data)?;
         let device = create_logical_device(&instance, &mut data)?;
         create_swapchain(window, &instance, &device, &mut data)?;
-        create_swapchain_image_veiws(&device, &mut data)?;
+        create_swapchain_image_views(&device, &mut data)?;
         create_render_pass(&instance, &device, &mut data)?;
         create_pipeline(&device, &mut data)?;
-        create_framebuffer(&device, &mut data)?;
+        create_framebuffers(&device, &mut data)?;
         create_command_pool(&instance, &device, &mut data)?;
         create_vertex_buffer(&instance, &device, &mut data)?;
         create_index_buffer(&instance, &device, &mut data)?;
@@ -210,10 +210,10 @@ impl App {
         self.device.device_wait_idle()?;
         self.destroy_swapchain();
         create_swapchain(window, &self.instance, &self.device, &mut self.data)?;
-        create_swapchain_image_veiws(&self.device, &mut self.data)?;
+        create_swapchain_image_views(&self.device, &mut self.data)?;
         create_render_pass(&self.instance, &self.device, &mut self.data)?;
         create_pipeline(&self.device, &mut self.data)?;
-        create_framebuffer(&self.device, &mut self.data)?;
+        create_framebuffers(&self.device, &mut self.data)?;
         create_command_buffers(&self.device, &mut self.data)?;
         self.data
             .images_in_flight
@@ -224,6 +224,8 @@ impl App {
     unsafe fn destroy(&mut self) {
         self.device.device_wait_idle().unwrap();
         self.destroy_swapchain();
+        self.device.destroy_buffer(self.data.index_buffer, None);
+        self.device.free_memory(self.data.index_buffer_memory, None);
         self.device.destroy_buffer(self.data.vertex_buffer, None);
         self.device
             .free_memory(self.data.vertex_buffer_memory, None);
@@ -284,15 +286,15 @@ struct AppData {
     pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
+    vertex_buffer: vk::Buffer,
+    vertex_buffer_memory: vk::DeviceMemory,
+    index_buffer: vk::Buffer,
+    index_buffer_memory: vk::DeviceMemory,
     command_buffers: Vec<vk::CommandBuffer>,
     image_available_semaphores: Vec<vk::Semaphore>,
     render_finished_semaphores: Vec<vk::Semaphore>,
     in_flight_fences: Vec<vk::Fence>,
     images_in_flight: Vec<vk::Fence>,
-    vertex_buffer: vk::Buffer,
-    vertex_buffer_memory: vk::DeviceMemory,
-    index_buffer: vk::Buffer,
-    index_buffer_memory: vk::DeviceMemory,
 }
 
 unsafe fn create_instance(window: &Window, entry: &Entry, data: &mut AppData) -> Result<Instance> {
@@ -566,7 +568,7 @@ fn get_swapchain_extension(
     }
 }
 
-unsafe fn create_swapchain_image_veiws(device: &Device, data: &mut AppData) -> Result<()> {
+unsafe fn create_swapchain_image_views(device: &Device, data: &mut AppData) -> Result<()> {
     data.swapchain_image_views = data
         .swapchain_images
         .iter()
@@ -763,7 +765,7 @@ unsafe fn create_shader_module(device: &Device, bytecode: &[u8]) -> Result<vk::S
     Ok(device.create_shader_module(&info, None)?)
 }
 
-unsafe fn create_framebuffer(device: &Device, data: &mut AppData) -> Result<()> {
+unsafe fn create_framebuffers(device: &Device, data: &mut AppData) -> Result<()> {
     data.framebuffers = data
         .swapchain_image_views
         .iter()
@@ -851,7 +853,7 @@ unsafe fn create_index_buffer(
     )?;
 
     let memory = device.map_memory(staging_buffer_memory, 0, size, vk::MemoryMapFlags::empty())?;
-    memcpy(VERTICES.as_ptr(), memory.cast(), VERTICES.len());
+    memcpy(INDICES.as_ptr(), memory.cast(), INDICES.len());
     device.unmap_memory(staging_buffer_memory);
 
     let (index_buffer, index_buffer_memory) = create_buffer(
@@ -863,8 +865,8 @@ unsafe fn create_index_buffer(
         vk::MemoryPropertyFlags::DEVICE_LOCAL,
     )?;
 
-    data.vertex_buffer = index_buffer;
-    data.vertex_buffer_memory = index_buffer_memory;
+    data.index_buffer = index_buffer;
+    data.index_buffer_memory = index_buffer_memory;
 
     copy_buffer(device, data, staging_buffer, index_buffer, size)?;
 
@@ -915,7 +917,9 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
             data.pipeline,
         );
         device.cmd_bind_vertex_buffers(*command_buffer, 0, &[data.vertex_buffer], &[0]);
-        device.cmd_draw(*command_buffer, 3, 1, 0, 0);
+        device.cmd_bind_index_buffer(*command_buffer, data.index_buffer, 0, vk::IndexType::UINT16);
+
+        device.cmd_draw_indexed(*command_buffer, INDICES.len() as u32, 1, 0, 0, 0);
 
         device.cmd_end_render_pass(*command_buffer);
         device.end_command_buffer(*command_buffer)?;
