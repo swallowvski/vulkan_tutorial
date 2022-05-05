@@ -6,7 +6,7 @@
 )]
 
 use std::{
-    collections::HashSet, ffi::CStr, fmt::Debug, mem::size_of, os::raw::c_void,
+    collections::HashSet, ffi::CStr, fmt::Debug, fs::File, mem::size_of, os::raw::c_void,
     ptr::copy_nonoverlapping as memcpy, time::Instant,
 };
 
@@ -121,6 +121,7 @@ impl App {
         create_pipeline(&device, &mut data)?;
         create_framebuffers(&device, &mut data)?;
         create_command_pool(&instance, &device, &mut data)?;
+        create_texture_image(&instance, &device, &mut data)?;
         create_vertex_buffer(&instance, &device, &mut data)?;
         create_index_buffer(&instance, &device, &mut data)?;
         create_uniform_buffers(&instance, &device, &mut data)?;
@@ -272,6 +273,9 @@ impl App {
     unsafe fn destroy(&mut self) {
         self.device.device_wait_idle().unwrap();
         self.destroy_swapchain();
+        self.device.destroy_image(self.data.texture_image, None);
+        self.device
+            .free_memory(self.data.texture_image_memory, None);
         self.device
             .destroy_descriptor_set_layout(self.data.descriptor_set_layout, None);
         self.device.destroy_buffer(self.data.index_buffer, None);
@@ -347,6 +351,8 @@ struct AppData {
     pipeline: vk::Pipeline,
     framebuffers: Vec<vk::Framebuffer>,
     command_pool: vk::CommandPool,
+    texture_image: vk::Image,
+    texture_image_memory: vk::DeviceMemory,
     vertex_buffer: vk::Buffer,
     vertex_buffer_memory: vk::DeviceMemory,
     index_buffer: vk::Buffer,
@@ -838,7 +844,7 @@ unsafe fn create_shader_module(device: &Device, bytecode: &[u8]) -> Result<vk::S
     let bytecode = Vec::<u8>::from(bytecode);
     let (prefix, code, suffix) = bytecode.align_to::<u32>();
     if !prefix.is_empty() || !suffix.is_empty() {
-        return Err(anyhow!("SShader bytecode is not properly aligned."));
+        return Err(anyhow!("Shader bytecode is not properly aligned."));
     }
 
     let info = vk::ShaderModuleCreateInfo::builder()
@@ -865,50 +871,6 @@ unsafe fn create_framebuffers(device: &Device, data: &mut AppData) -> Result<()>
         .collect::<Result<Vec<_>, _>>()?;
     Ok(())
 }
-
-unsafe fn create_descriptor_pool(device: &Device, data: &mut AppData) -> Result<()> {
-    let ubo_size = vk::DescriptorPoolSize::builder()
-        .type_(vk::DescriptorType::UNIFORM_BUFFER)
-        .descriptor_count(data.swapchain_images.len() as u32);
-
-    let pool_sizes = &[ubo_size];
-    let info = vk::DescriptorPoolCreateInfo::builder()
-        .pool_sizes(pool_sizes)
-        .max_sets(data.swapchain_images.len() as u32);
-
-    data.descriptor_pool = device.create_descriptor_pool(&info, None)?;
-
-    Ok(())
-}
-
-unsafe fn create_descriptor_sets(device: &Device, data: &mut AppData) -> Result<()> {
-    let layouts = vec![data.descriptor_set_layout; data.swapchain_images.len()];
-    let info = vk::DescriptorSetAllocateInfo::builder()
-        .descriptor_pool(data.descriptor_pool)
-        .set_layouts(&layouts);
-
-    data.descriptor_sets = device.allocate_descriptor_sets(&info)?;
-
-    for i in 0..data.swapchain_images.len() {
-        let info = vk::DescriptorBufferInfo::builder()
-            .buffer(data.uniform_buffers[i])
-            .offset(0)
-            .range(size_of::<UniformBufferObject>() as u64);
-
-        let buffer_info = &[info];
-        let ubo_write = vk::WriteDescriptorSet::builder()
-            .dst_set(data.descriptor_sets[i])
-            .dst_binding(0)
-            .dst_array_element(0)
-            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-            .buffer_info(buffer_info);
-
-        device.update_descriptor_sets(&[ubo_write], &[] as &[vk::CopyDescriptorSet]);
-    }
-
-    Ok(())
-}
-
 unsafe fn create_command_pool(
     instance: &Instance,
     device: &Device,
@@ -920,6 +882,82 @@ unsafe fn create_command_pool(
         .queue_family_index(indices.graphics);
 
     data.command_pool = device.create_command_pool(&info, None)?;
+    Ok(())
+}
+
+unsafe fn create_texture_image(
+    instance: &Instance,
+    device: &Device,
+    data: &mut AppData,
+) -> Result<()> {
+    let image = File::open("./resources/texture.png")?;
+
+    let decoder = png::Decoder::new(image);
+    let (info, mut render) = decoder.read_info()?;
+    let mut pixels = vec![0; info.buffer_size()];
+    render.next_frame(&mut pixels)?;
+    let size = info.buffer_size() as u64;
+
+    let (staging_buffer, staging_buffer_memory) = create_buffer(
+        instance,
+        device,
+        data,
+        size,
+        vk::BufferUsageFlags::TRANSFER_SRC,
+        vk::MemoryPropertyFlags::HOST_COHERENT | vk::MemoryPropertyFlags::HOST_VISIBLE,
+    )?;
+
+    let memory = device.map_memory(staging_buffer_memory, 0, size, vk::MemoryMapFlags::empty())?;
+
+    memcpy(pixels.as_ptr(), memory.cast(), pixels.len());
+
+    device.unmap_memory(staging_buffer_memory);
+
+    let (texture_image, texture_image_memory) = create_image(
+        instance,
+        device,
+        data,
+        info.width,
+        info.height,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageTiling::OPTIMAL,
+        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
+
+    data.texture_image = texture_image;
+    data.texture_image_memory = texture_image_memory;
+
+    transition_image_layout(
+        device,
+        data,
+        data.texture_image,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageLayout::UNDEFINED,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+    )?;
+
+    copy_buffer_to_image(
+        device,
+        data,
+        staging_buffer,
+        data.texture_image,
+        info.width,
+        info.height,
+    )?;
+
+    transition_image_layout(
+        device,
+        data,
+        data.texture_image,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+    )?;
+
+    device.destroy_buffer(staging_buffer, None);
+    device.free_memory(staging_buffer_memory, None);
+
     Ok(())
 }
 
@@ -1025,6 +1063,49 @@ unsafe fn create_uniform_buffers(
     Ok(())
 }
 
+unsafe fn create_descriptor_pool(device: &Device, data: &mut AppData) -> Result<()> {
+    let ubo_size = vk::DescriptorPoolSize::builder()
+        .type_(vk::DescriptorType::UNIFORM_BUFFER)
+        .descriptor_count(data.swapchain_images.len() as u32);
+
+    let pool_sizes = &[ubo_size];
+    let info = vk::DescriptorPoolCreateInfo::builder()
+        .pool_sizes(pool_sizes)
+        .max_sets(data.swapchain_images.len() as u32);
+
+    data.descriptor_pool = device.create_descriptor_pool(&info, None)?;
+
+    Ok(())
+}
+
+unsafe fn create_descriptor_sets(device: &Device, data: &mut AppData) -> Result<()> {
+    let layouts = vec![data.descriptor_set_layout; data.swapchain_images.len()];
+    let info = vk::DescriptorSetAllocateInfo::builder()
+        .descriptor_pool(data.descriptor_pool)
+        .set_layouts(&layouts);
+
+    data.descriptor_sets = device.allocate_descriptor_sets(&info)?;
+
+    for i in 0..data.swapchain_images.len() {
+        let info = vk::DescriptorBufferInfo::builder()
+            .buffer(data.uniform_buffers[i])
+            .offset(0)
+            .range(size_of::<UniformBufferObject>() as u64);
+
+        let buffer_info = &[info];
+        let ubo_write = vk::WriteDescriptorSet::builder()
+            .dst_set(data.descriptor_sets[i])
+            .dst_binding(0)
+            .dst_array_element(0)
+            .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+            .buffer_info(buffer_info);
+
+        device.update_descriptor_sets(&[ubo_write], &[] as &[vk::CopyDescriptorSet]);
+    }
+
+    Ok(())
+}
+
 unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<()> {
     let allocate_info = vk::CommandBufferAllocateInfo::builder()
         .command_pool(data.command_pool)
@@ -1115,7 +1196,7 @@ struct QueueFamilyIndices {
 impl QueueFamilyIndices {
     unsafe fn get(
         instance: &Instance,
-        data: &mut AppData,
+        data: &AppData,
         physical_device: vk::PhysicalDevice,
     ) -> Result<Self> {
         let properties = instance.get_physical_device_queue_family_properties(physical_device);
@@ -1157,7 +1238,7 @@ struct SwapchainSupport {
 impl SwapchainSupport {
     unsafe fn get(
         instance: &Instance,
-        data: &mut AppData,
+        data: &AppData,
         physical_device: vk::PhysicalDevice,
     ) -> Result<Self> {
         Ok(Self {
@@ -1221,7 +1302,7 @@ impl Vertex {
 unsafe fn create_buffer(
     instance: &Instance,
     device: &Device,
-    data: &mut AppData,
+    data: &AppData,
     size: vk::DeviceSize,
     usage: vk::BufferUsageFlags,
     properties: vk::MemoryPropertyFlags,
@@ -1258,6 +1339,176 @@ unsafe fn copy_buffer(
     destination: vk::Buffer,
     size: vk::DeviceSize,
 ) -> Result<()> {
+    let command_buffer = begin_single_time_commands(device, data)?;
+
+    let regions = vk::BufferCopy::builder().size(size);
+    device.cmd_copy_buffer(command_buffer, source, destination, &[regions]);
+
+    end_single_time_commands(device, data, command_buffer)?;
+
+    Ok(())
+}
+
+unsafe fn create_image(
+    instance: &Instance,
+    device: &Device,
+    data: &AppData,
+    width: u32,
+    height: u32,
+    format: vk::Format,
+    tiling: vk::ImageTiling,
+    usage: vk::ImageUsageFlags,
+    properties: vk::MemoryPropertyFlags,
+) -> Result<(vk::Image, vk::DeviceMemory)> {
+    let info = vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::_2D)
+        .extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        })
+        .mip_levels(1)
+        .array_layers(1)
+        .format(format)
+        .tiling(tiling)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .usage(usage)
+        .samples(vk::SampleCountFlags::_1)
+        .sharing_mode(vk::SharingMode::EXCLUSIVE);
+
+    let image = device.create_image(&info, None)?;
+
+    let requirements = device.get_image_memory_requirements(image);
+
+    let info = vk::MemoryAllocateInfo::builder()
+        .allocation_size(requirements.size)
+        .memory_type_index(get_memory_type_index(
+            instance,
+            data,
+            properties,
+            requirements,
+        )?);
+
+    let image_memory = device.allocate_memory(&info, None)?;
+
+    device.bind_image_memory(image, image_memory, 0)?;
+    Ok((image, image_memory))
+}
+
+unsafe fn transition_image_layout(
+    device: &Device,
+    data: &AppData,
+    image: vk::Image,
+    format: vk::Format,
+    old_layout: vk::ImageLayout,
+    new_layout: vk::ImageLayout,
+) -> Result<()> {
+    let (src_access_mask, dst_access_mask, src_stage_mask, dst_stage_mask) =
+        match (old_layout, new_layout) {
+            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+            ),
+            (vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            _ => return Err(anyhow!("Unsupported image layout transition")),
+        };
+
+    let command_buffer = begin_single_time_commands(device, data)?;
+    let subresource = vk::ImageSubresourceRange::builder()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .base_mip_level(0)
+        .level_count(1)
+        .base_array_layer(0)
+        .layer_count(1);
+
+    let barrier = vk::ImageMemoryBarrier::builder()
+        .old_layout(old_layout)
+        .new_layout(new_layout)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .image(image)
+        .subresource_range(subresource)
+        .src_access_mask(src_access_mask)
+        .dst_access_mask(dst_access_mask);
+
+    device.cmd_pipeline_barrier(
+        command_buffer,
+        src_stage_mask,
+        dst_stage_mask,
+        vk::DependencyFlags::empty(),
+        &[] as &[vk::MemoryBarrier],
+        &[] as &[vk::BufferMemoryBarrier],
+        &[barrier],
+    );
+
+    end_single_time_commands(device, data, command_buffer)?;
+    Ok(())
+}
+
+unsafe fn copy_buffer_to_image(
+    device: &Device,
+    data: &AppData,
+    buffer: vk::Buffer,
+    image: vk::Image,
+    width: u32,
+    height: u32,
+) -> Result<()> {
+    let command_buffer = begin_single_time_commands(device, data)?;
+
+    let subresource = vk::ImageSubresourceLayers::builder()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .mip_level(0)
+        .base_array_layer(0)
+        .layer_count(1);
+
+    let region = vk::BufferImageCopy::builder()
+        .buffer_offset(0)
+        .buffer_row_length(0)
+        .buffer_image_height(0)
+        .image_subresource(subresource)
+        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+        .image_extent(vk::Extent3D {
+            width,
+            height,
+            depth: 1,
+        });
+
+    device.cmd_copy_buffer_to_image(
+        command_buffer,
+        buffer,
+        image,
+        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        &[region],
+    );
+
+    end_single_time_commands(device, data, command_buffer)?;
+    Ok(())
+}
+
+unsafe fn get_memory_type_index(
+    instance: &Instance,
+    data: &AppData,
+    properties: vk::MemoryPropertyFlags,
+    requirements: vk::MemoryRequirements,
+) -> Result<u32> {
+    let memory = instance.get_physical_device_memory_properties(data.physical_device);
+    (0..memory.memory_type_count)
+        .find(|i| {
+            let suitable = (requirements.memory_type_bits & (1 << i)) != 0;
+            let memory_type = memory.memory_types[*i as usize];
+            suitable && memory_type.property_flags.contains(properties)
+        })
+        .ok_or_else(|| anyhow!("Failed to find suitable memory type."))
+}
+
+unsafe fn begin_single_time_commands(device: &Device, data: &AppData) -> Result<vk::CommandBuffer> {
     let info = vk::CommandBufferAllocateInfo::builder()
         .level(vk::CommandBufferLevel::PRIMARY)
         .command_pool(data.command_pool)
@@ -1270,9 +1521,14 @@ unsafe fn copy_buffer(
 
     device.begin_command_buffer(command_buffer, &info)?;
 
-    let regions = vk::BufferCopy::builder().size(size);
-    device.cmd_copy_buffer(command_buffer, source, destination, &[regions]);
+    Ok(command_buffer)
+}
 
+unsafe fn end_single_time_commands(
+    device: &Device,
+    data: &AppData,
+    command_buffer: vk::CommandBuffer,
+) -> Result<()> {
     device.end_command_buffer(command_buffer)?;
 
     let command_buffers = &[command_buffer];
@@ -1284,20 +1540,4 @@ unsafe fn copy_buffer(
     device.free_command_buffers(data.command_pool, &[command_buffer]);
 
     Ok(())
-}
-
-unsafe fn get_memory_type_index(
-    instance: &Instance,
-    data: &mut AppData,
-    properties: vk::MemoryPropertyFlags,
-    requirements: vk::MemoryRequirements,
-) -> Result<u32> {
-    let memory = instance.get_physical_device_memory_properties(data.physical_device);
-    (0..memory.memory_type_count)
-        .find(|i| {
-            let suitable = (requirements.memory_type_bits & (1 << i)) != 0;
-            let memory_type = memory.memory_types[*i as usize];
-            suitable && memory_type.property_flags.contains(properties)
-        })
-        .ok_or_else(|| anyhow!("Failed to find suitable memory type."))
 }
