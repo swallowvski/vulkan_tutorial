@@ -237,7 +237,7 @@ impl App {
         );
         proj[(1, 1)] *= -1.;
 
-        let ubo = UniformBufferObject { model, view, proj };
+        let ubo = UniformBufferObject { view, proj };
 
         let memory = self.device.map_memory(
             self.data.uniform_buffers_memory[image_index],
@@ -890,9 +890,9 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
 
     let attachment = vk::PipelineColorBlendAttachmentState::builder()
         .color_write_mask(vk::ColorComponentFlags::all())
-        .blend_enable(false)
-        .src_color_blend_factor(vk::BlendFactor::ONE)
-        .dst_color_blend_factor(vk::BlendFactor::ZERO)
+        .blend_enable(true)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
         .color_blend_op(vk::BlendOp::ADD)
         .src_alpha_blend_factor(vk::BlendFactor::ONE)
         .dst_alpha_blend_factor(vk::BlendFactor::ZERO)
@@ -905,13 +905,26 @@ unsafe fn create_pipeline(device: &Device, data: &mut AppData) -> Result<()> {
         .attachments(attachments)
         .blend_constants([0., 0., 0., 0.]);
 
+    let vert_push_constant_range = vk::PushConstantRange::builder()
+        .stage_flags(vk::ShaderStageFlags::VERTEX)
+        .offset(0)
+        .size(64);
+
+    let frag_push_constant_range = vk::PushConstantRange::builder()
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+        .offset(64)
+        .size(4);
+
     let dynamic_states = &[vk::DynamicState::VIEWPORT, vk::DynamicState::LINE_WIDTH];
 
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(dynamic_states);
 
     let set_layouts = &[data.descriptor_set_layout];
-    let layout_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(set_layouts);
+    let push_constant_ranges = &[vert_push_constant_range, frag_push_constant_range];
+    let layout_info = vk::PipelineLayoutCreateInfo::builder()
+        .set_layouts(set_layouts)
+        .push_constant_ranges(push_constant_ranges);
 
     data.pipeline_layout = device.create_pipeline_layout(&layout_info, None)?;
 
@@ -1568,6 +1581,8 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
         .command_buffer_count(data.framebuffers.len() as u32);
 
     data.command_buffers = device.allocate_command_buffers(&allocate_info)?;
+    let model = glm::rotate(&glm::identity(), 0.0f32, &glm::vec3(0., 0., 1.));
+    let (_, model_bytes, _) = model.as_slice().align_to::<u8>();
 
     for (i, command_buffer) in data.command_buffers.iter().enumerate() {
         let inheritance = vk::CommandBufferInheritanceInfo::builder();
@@ -1618,6 +1633,22 @@ unsafe fn create_command_buffers(device: &Device, data: &mut AppData) -> Result<
             0,
             &[data.descriptor_sets[i]],
             &[],
+        );
+
+        device.cmd_push_constants(
+            *command_buffer,
+            data.pipeline_layout,
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            model_bytes,
+        );
+
+        device.cmd_push_constants(
+            *command_buffer,
+            data.pipeline_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            64,
+            &0.25f32.to_ne_bytes()[..],
         );
 
         device.cmd_draw_indexed(*command_buffer, data.indices.len() as u32, 1, 0, 0, 0);
@@ -1717,7 +1748,6 @@ impl SwapchainSupport {
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 struct UniformBufferObject {
-    model: glm::Mat4,
     view: glm::Mat4,
     proj: glm::Mat4,
 }
