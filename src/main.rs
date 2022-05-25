@@ -31,7 +31,7 @@ use vulkanalia::{
 };
 use winit::{
     dpi::LogicalSize,
-    event::{Event, WindowEvent},
+    event::{ElementState, Event, VirtualKeyCode, WindowEvent},
     event_loop::{ControlFlow, EventLoop},
     window::{Window, WindowBuilder},
 };
@@ -83,6 +83,18 @@ fn main() -> Result<()> {
                     app.resized = true;
                 }
             }
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { input, .. },
+                ..
+            } => {
+                if input.state == ElementState::Pressed {
+                    match input.virtual_keycode {
+                        Some(VirtualKeyCode::Left) if app.models > 1 => app.models -= 1,
+                        Some(VirtualKeyCode::Right) if app.models < 4 => app.models += 1,
+                        _ => {}
+                    }
+                }
+            }
             _ => {}
         }
     });
@@ -99,6 +111,7 @@ struct App {
     frame: usize,
     resized: bool,
     start: Instant,
+    models: usize,
 }
 
 impl App {
@@ -139,6 +152,7 @@ impl App {
             frame: 0,
             resized: false,
             start: Instant::now(),
+            models: 1,
         })
     }
 
@@ -231,17 +245,7 @@ impl App {
 
         self.data.command_buffers[image_index] = command_buffer;
 
-        let time = self.start.elapsed().as_secs_f32();
-
-        let model = glm::rotate(
-            &glm::identity(),
-            time * glm::radians(&glm::vec1(90.))[0],
-            &glm::vec3(0., 0., 1.),
-        );
-        let (_, model_bytes, _) = model.as_slice().align_to::<u8>();
-
-        let info = vk::CommandBufferBeginInfo::builder()
-            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        let info = vk::CommandBufferBeginInfo::builder();
 
         self.device.begin_command_buffer(command_buffer, &info)?;
 
@@ -270,14 +274,73 @@ impl App {
             .render_area(render_area)
             .clear_values(clear_values);
 
+        self.device.cmd_begin_render_pass(
+            command_buffer,
+            &info,
+            vk::SubpassContents::SECONDARY_COMMAND_BUFFERS,
+        );
+
+        let secondary_command_buffers = (0..self.models)
+            .map(|i| self.update_secondary_command_buffer(image_index, i))
+            .collect::<Result<Vec<_>, _>>()?;
+
         self.device
-            .cmd_begin_render_pass(command_buffer, &info, vk::SubpassContents::INLINE);
+            .cmd_execute_commands(command_buffer, &secondary_command_buffers[..]);
+
+        self.device.cmd_end_render_pass(command_buffer);
+
+        self.device.end_command_buffer(command_buffer)?;
+
+        Ok(())
+    }
+
+    unsafe fn update_secondary_command_buffer(
+        &mut self,
+        image_index: usize,
+        model_index: usize,
+    ) -> Result<vk::CommandBuffer> {
+        let allocate_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(self.data.command_pools[image_index])
+            .level(vk::CommandBufferLevel::SECONDARY)
+            .command_buffer_count(1);
+
+        let command_buffer = self.device.allocate_command_buffers(&allocate_info)?[0];
+
+        let y = (((model_index % 2) as f32) * 2.5) - 1.25;
+        let z = (((model_index / 2) as f32) * -2.) + 1.;
+
+        let model = glm::translate(&glm::identity(), &glm::vec3(0., y, z));
+
+        let time = self.start.elapsed().as_secs_f32();
+
+        let model = glm::rotate(
+            &model,
+            time * glm::radians(&glm::vec1(90.))[0],
+            &glm::vec3(0., 0., 1.),
+        );
+
+        let (_, model_bytes, _) = model.as_slice().align_to::<u8>();
+
+        let opacity = (model_index + 1) as f32 * 0.25;
+        let opacity_bytes = &opacity.to_ne_bytes()[..];
+
+        let inheritance_info = vk::CommandBufferInheritanceInfo::builder()
+            .render_pass(self.data.render_pass)
+            .subpass(0)
+            .framebuffer(self.data.framebuffers[image_index]);
+
+        let info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::RENDER_PASS_CONTINUE)
+            .inheritance_info(&inheritance_info);
+
+        self.device.begin_command_buffer(command_buffer, &info)?;
 
         self.device.cmd_bind_pipeline(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
             self.data.pipeline,
         );
+
         self.device
             .cmd_bind_vertex_buffers(command_buffer, 0, &[self.data.vertex_buffer], &[0]);
         self.device.cmd_bind_index_buffer(
@@ -286,7 +349,6 @@ impl App {
             0,
             vk::IndexType::UINT32,
         );
-
         self.device.cmd_bind_descriptor_sets(
             command_buffer,
             vk::PipelineBindPoint::GRAPHICS,
@@ -309,31 +371,31 @@ impl App {
             self.data.pipeline_layout,
             vk::ShaderStageFlags::FRAGMENT,
             64,
-            &0.25f32.to_ne_bytes()[..],
+            opacity_bytes,
         );
 
         self.device
             .cmd_draw_indexed(command_buffer, self.data.indices.len() as u32, 1, 0, 0, 0);
-        self.device.cmd_end_render_pass(command_buffer);
 
         self.device.end_command_buffer(command_buffer)?;
 
-        Ok(())
+        Ok(command_buffer)
     }
 
     unsafe fn update_uniform_buffer(&self, image_index: usize) -> Result<()> {
-        let time = self.start.elapsed().as_secs_f32();
         let view = glm::look_at(
-            &glm::vec3(2., 2., 2.),
+            &glm::vec3(6., 0., 2.),
             &glm::vec3(0., 0., 0.),
             &glm::vec3(0., 0., 1.),
         );
+
         let mut proj = glm::perspective_rh_zo(
             self.data.swapchain_extent.width as f32 / self.data.swapchain_extent.height as f32,
             glm::radians(&glm::vec1(45.))[0],
             0.1,
             10.,
         );
+
         proj[(1, 1)] *= -1.;
 
         let ubo = UniformBufferObject { view, proj };
@@ -349,7 +411,6 @@ impl App {
 
         self.device
             .unmap_memory(self.data.uniform_buffers_memory[image_index]);
-
         Ok(())
     }
 
@@ -1495,7 +1556,7 @@ fn load_model(data: &mut AppData) -> Result<()> {
         map.insert("Texture1".to_string(), 0);
         Ok((vec![tobj::Material::empty()], map))
     })?;
-    let mut unique_verices = HashMap::new();
+    let mut unique_vertices = HashMap::new();
 
     for model in &models {
         for index in &model.mesh.indices {
@@ -1516,11 +1577,11 @@ fn load_model(data: &mut AppData) -> Result<()> {
             };
 
             data.vertices.push(vertex);
-            if let Some(index) = unique_verices.get(&vertex) {
+            if let Some(index) = unique_vertices.get(&vertex) {
                 data.indices.push(*index as u32);
             } else {
                 let index = data.vertices.len();
-                unique_verices.insert(vertex, index);
+                unique_vertices.insert(vertex, index);
                 data.vertices.push(vertex);
                 data.indices.push(index as u32);
             }
