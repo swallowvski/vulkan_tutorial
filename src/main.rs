@@ -5,6 +5,9 @@
     clippy::unnecessary_wraps
 )]
 
+mod thread_pool;
+use thread_pool::ThreadPool;
+
 use std::{
     collections::{HashMap, HashSet},
     ffi::CStr,
